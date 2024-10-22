@@ -10,7 +10,7 @@
 
 use super::Client;
 use crate::types::{ChatMap, Update};
-use futures_util::future::{select, Either};
+use futures_util::future::{select, BoxFuture, Either};
 pub use grammers_mtsender::{AuthorizationError, InvocationError};
 use grammers_session::channel_id;
 pub use grammers_session::{PrematureEndReason, UpdateState};
@@ -77,6 +77,8 @@ impl Client {
     pub async fn next_raw_update(
         &self,
     ) -> Result<(tl::enums::Update, Arc<ChatMap>), InvocationError> {
+        let mut step: Option<BoxFuture<Result<(), grammers_mtsender::ReadError>>> = None;
+
         loop {
             let (deadline, get_diff, get_channel_diff) = {
                 let state = &mut *self.0.state.write().unwrap();
@@ -182,11 +184,19 @@ impl Client {
             }
 
             let sleep = pin!(async { sleep_until(deadline.into()).await });
-            let step = pin!(async { self.step().await });
 
-            match select(sleep, step).await {
-                Either::Left(_) => {}
-                Either::Right((step, _)) => step?,
+            let local_step = match step.take() {
+                Some(step) => step,
+                None => Box::pin(self.step()),
+            };
+
+            match select(sleep, local_step).await {
+                Either::Left((_, unfinished_step)) => {
+                    step = Some(unfinished_step);
+                }
+                Either::Right((step, _)) => {
+                    step?;
+                }
             }
         }
     }
