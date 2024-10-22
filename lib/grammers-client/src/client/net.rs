@@ -13,7 +13,7 @@ use grammers_mtproto::transport;
 use grammers_mtsender::{self as sender, AuthorizationError, InvocationError, RpcError, Sender};
 use grammers_session::{ChatHashCache, MessageBox};
 use grammers_tl_types::{self as tl, Deserializable};
-use log::{debug, info};
+use log::{debug, info, trace};
 use sender::Enqueuer;
 use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -405,7 +405,9 @@ impl Connection {
                     Err(e) => break Err(e),
                 },
                 Err(TryRecvError::Empty) => {
+                    trace!("no response yet, invoking step");
                     on_updates(self.step().await?);
+                    trace!("step finished");
                 }
                 Err(TryRecvError::Closed) => {
                     panic!("request channel dropped before receiving a result")
