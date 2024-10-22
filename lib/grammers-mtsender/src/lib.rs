@@ -13,7 +13,6 @@ mod reconnection;
 
 pub use crate::reconnection::*;
 pub use errors::{AuthorizationError, InvocationError, ReadError, RpcError};
-use futures_util::future::{pending, select, Either};
 use grammers_crypto::DequeBuffer;
 use grammers_mtproto::mtp::{
     self, BadMessage, Deserialization, DeserializationFailure, Mtp, RpcResult, RpcResultError,
@@ -25,7 +24,6 @@ use log::{debug, error, info, trace, warn};
 use std::io;
 use std::io::Error;
 use std::ops::ControlFlow;
-use std::pin::pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::SystemTime;
 use tl::Serializable;
@@ -318,23 +316,20 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
 
         let (mut reader, mut writer) = self.stream.split();
         let sel = {
-            let sleep = pin!(async { sleep_until(self.next_ping).await });
-            let recv_req = pin!(async { self.request_rx.recv().await });
-            let recv_data =
-                pin!(async { reader.read(&mut self.read_buffer[self.read_tail..]).await });
-            let send_data = pin!(async {
-                if self.write_buffer.is_empty() {
-                    pending().await
-                } else {
-                    writer.write(&self.write_buffer[self.write_head..]).await
-                }
-            });
+            let sleep = sleep_until(self.next_ping);
+            let recv_req = self.request_rx.recv();
 
-            match select(select(sleep, recv_req), select(recv_data, send_data)).await {
-                Either::Left((Either::Left(_), _)) => Sel::Sleep,
-                Either::Left((Either::Right((request, _)), _)) => Sel::Request(request),
-                Either::Right((Either::Left((n, _)), _)) => Sel::Read(n),
-                Either::Right((Either::Right((n, _)), _)) => Sel::Write(n),
+            let should_read = !self.read_buffer[self.read_tail..].is_empty();
+            let recv_data = reader.read(&mut self.read_buffer[self.read_tail..]);
+
+            let should_write = !self.write_buffer[self.write_head..].is_empty();
+            let send_data = writer.write(&self.write_buffer[self.write_head..]);
+
+            tokio::select! {
+                _ = sleep => Sel::Sleep,
+                request = recv_req => Sel::Request(request),
+                n = recv_data, if should_read => Sel::Read(n),
+                n = send_data, if should_write => Sel::Write(n) ,
             }
         };
 
