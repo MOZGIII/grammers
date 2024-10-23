@@ -155,7 +155,7 @@ impl Client {
                 let (sender, request_tx) = connect_sender(dc_id, &self.0.config).await?;
                 {
                     *self.0.conn.sender.lock().await = sender;
-                    *self.0.conn.request_tx.write().unwrap() = request_tx;
+                    *self.0.conn.request_tx.lock().await = request_tx;
                     let mut state = self.0.state.write().unwrap();
                     state.dc_id = dc_id;
                 }
@@ -235,7 +235,7 @@ impl Client {
                 let (sender, request_tx) = connect_sender(dc_id, &self.0.config).await?;
                 {
                     *self.0.conn.sender.lock().await = sender;
-                    *self.0.conn.request_tx.write().unwrap() = request_tx;
+                    *self.0.conn.request_tx.lock().await = request_tx;
                     let mut state = self.0.state.write().unwrap();
                     state.dc_id = dc_id;
                 }

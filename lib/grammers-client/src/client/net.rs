@@ -369,7 +369,7 @@ impl Connection {
     fn new(sender: Sender<transport::Full, mtp::Encrypted>, request_tx: Enqueuer) -> Self {
         Self {
             sender: AsyncMutex::new(sender),
-            request_tx: RwLock::new(request_tx),
+            request_tx: AsyncMutex::new(request_tx),
             step_counter: AtomicU32::new(0),
         }
     }
@@ -383,9 +383,9 @@ impl Connection {
         let mut slept_flood = false;
 
         let mut rx = {
-            let enqueuer = self.request_tx.read().unwrap();
+            let enqueuer = self.request_tx.lock().await;
             trace!("got enqueuer lock");
-            let rx = enqueuer.enqueue(request);
+            let rx = enqueuer.enqueue(request).await;
             trace!("got rx");
             drop(enqueuer);
             rx
@@ -418,7 +418,7 @@ impl Connection {
                             );
                             tokio::time::sleep(delay).await;
                             slept_flood = true;
-                            rx = self.request_tx.read().unwrap().enqueue(request);
+                            rx = self.request_tx.lock().await.enqueue(request).await;
                             continue;
                         }
                         Err(e) => break Err(e),

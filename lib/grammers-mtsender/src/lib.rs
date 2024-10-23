@@ -118,7 +118,7 @@ pub struct Sender<T: Transport, M: Mtp> {
     #[cfg(feature = "proxy")]
     proxy_url: Option<String>,
     requests: Vec<Request>,
-    request_rx: mpsc::UnboundedReceiver<Request>,
+    request_rx: mpsc::Receiver<Request>,
     next_ping: Instant,
     reconnection_policy: &'static dyn ReconnectionPolicy,
 
@@ -150,7 +150,7 @@ enum RequestState {
 }
 
 #[derive(Debug)]
-pub struct Enqueuer(mpsc::UnboundedSender<Request>);
+pub struct Enqueuer(mpsc::Sender<Request>);
 
 impl MsgIdPair {
     fn new(msg_id: MsgId) -> Self {
@@ -163,7 +163,7 @@ impl MsgIdPair {
 
 impl Enqueuer {
     /// Enqueue a Remote Procedure Call to be sent in future calls to `step`.
-    pub fn enqueue<R: RemoteCall>(
+    pub async fn enqueue<R: RemoteCall>(
         &self,
         request: &R,
     ) -> oneshot::Receiver<Result<Vec<u8>, InvocationError>> {
@@ -176,12 +176,16 @@ impl Enqueuer {
             tl::name_for_id(req_id)
         );
 
-        let (tx, rx) = oneshot::channel();
-        if let Err(err) = self.0.send(Request {
-            body,
-            state: RequestState::NotSerialized,
-            result: tx,
-        }) {
+        let (res_tx, res_rx) = oneshot::channel();
+        if let Err(err) = self
+            .0
+            .send(Request {
+                body,
+                state: RequestState::NotSerialized,
+                result: res_tx,
+            })
+            .await
+        {
             debug!(
                 "failed enqueuing request {}: {err:?}",
                 tl::name_for_id(req_id)
@@ -190,7 +194,8 @@ impl Enqueuer {
         }
 
         debug!("enqueued request {} successfully", tl::name_for_id(req_id));
-        rx
+
+        res_rx
     }
 }
 
@@ -202,7 +207,7 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         reconnection_policy: &'static dyn ReconnectionPolicy,
     ) -> Result<(Self, Enqueuer), io::Error> {
         let stream = connect_stream(&addr).await?;
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(64);
         Ok((
             Self {
                 stream,
