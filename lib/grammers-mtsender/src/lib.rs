@@ -129,6 +129,7 @@ pub struct Sender<T: Transport, M: Mtp> {
     write_head: usize,
 }
 
+#[derive(Debug)]
 struct Request {
     body: Vec<u8>,
     state: RequestState,
@@ -141,12 +142,14 @@ struct MsgIdPair {
     container_msg_id: MsgId,
 }
 
+#[derive(Debug)]
 enum RequestState {
     NotSerialized,
     Serialized(MsgIdPair),
     Sent(MsgIdPair),
 }
 
+#[derive(Debug)]
 pub struct Enqueuer(mpsc::UnboundedSender<Request>);
 
 impl MsgIdPair {
@@ -179,8 +182,14 @@ impl Enqueuer {
             state: RequestState::NotSerialized,
             result: tx,
         }) {
+            debug!(
+                "failed enqueuing request {}: {err:?}",
+                tl::name_for_id(req_id)
+            );
             err.0.result.send(Err(InvocationError::Dropped)).unwrap();
         }
+
+        debug!("enqueued request {} successfully", tl::name_for_id(req_id));
         rx
     }
 }
@@ -300,6 +309,13 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
     ///
     /// Updates received during this step, if any, are returned.
     pub async fn step(&mut self) -> Result<Vec<tl::enums::Updates>, ReadError> {
+        scopeguard::defer! {
+            log::warn!("step future is dropped!!!!");
+        };
+
+        trace!("sender step start");
+
+        #[derive(Debug)]
         enum Sel {
             Sleep,
             Request(Option<Request>),
@@ -317,13 +333,19 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
         let (mut reader, mut writer) = self.stream.split();
         let sel = {
             let sleep = sleep_until(self.next_ping);
-            let recv_req = self.request_rx.recv();
+            let recv_req = async {
+                let res = self.request_rx.recv().await;
+                log::info!("request_rx.recv");
+                res
+            };
 
             let should_read = !self.read_buffer[self.read_tail..].is_empty();
             let recv_data = reader.read(&mut self.read_buffer[self.read_tail..]);
 
             let should_write = !self.write_buffer[self.write_head..].is_empty();
             let send_data = writer.write(&self.write_buffer[self.write_head..]);
+
+            log::info!("waiting for sel");
 
             tokio::select! {
                 _ = sleep => Sel::Sleep,
@@ -332,6 +354,8 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                 n = send_data, if should_write => Sel::Write(n) ,
             }
         };
+
+        log::info!("got sel: {sel:?}");
 
         let res = match sel {
             Sel::Request(request) => {
@@ -348,6 +372,8 @@ impl<T: Transport, M: Mtp> Sender<T, M> {
                 Ok(Vec::new())
             }
         };
+
+        log::info!("sender step end");
 
         match res {
             Ok(ok) => Ok(ok),

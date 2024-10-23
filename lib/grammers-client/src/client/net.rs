@@ -337,8 +337,11 @@ impl Client {
     /// # }
     /// ```
     pub async fn step(&self) -> Result<(), sender::ReadError> {
+        trace!("step start");
         let updates = self.0.conn.step().await?;
+        trace!("step after conn step");
         self.process_socket_updates(updates);
+        trace!("step end");
         Ok(())
     }
 
@@ -379,31 +382,48 @@ impl Connection {
     ) -> Result<R::Return, InvocationError> {
         let mut slept_flood = false;
 
-        let mut rx = { self.request_tx.read().unwrap().enqueue(request) };
+        let mut rx = {
+            let enqueuer = self.request_tx.read().unwrap();
+            trace!("got enqueuer lock");
+            let rx = enqueuer.enqueue(request);
+            trace!("got rx");
+            drop(enqueuer);
+            rx
+        };
+        trace!("got rx outer");
         loop {
-            match rx.try_recv() {
-                Ok(response) => match response {
-                    Ok(body) => break R::Return::from_bytes(&body).map_err(|e| e.into()),
-                    Err(InvocationError::Rpc(RpcError {
-                        name,
-                        code: 420,
-                        value: Some(seconds),
-                        ..
-                    })) if !slept_flood && seconds <= flood_sleep_threshold => {
-                        let delay = std::time::Duration::from_secs(seconds as _);
-                        info!(
-                            "sleeping on {} for {:?} before retrying {}",
+            trace!("before try_recv");
+            let result = rx.try_recv();
+            trace!("after try_recv");
+            match result {
+                Ok(response) => {
+                    trace!("got response");
+                    match response {
+                        Ok(body) => {
+                            trace!("got response ok");
+                            break R::Return::from_bytes(&body).map_err(|e| e.into());
+                        }
+                        Err(InvocationError::Rpc(RpcError {
                             name,
-                            delay,
-                            std::any::type_name::<R>()
-                        );
-                        tokio::time::sleep(delay).await;
-                        slept_flood = true;
-                        rx = self.request_tx.read().unwrap().enqueue(request);
-                        continue;
+                            code: 420,
+                            value: Some(seconds),
+                            ..
+                        })) if !slept_flood && seconds <= flood_sleep_threshold => {
+                            let delay = std::time::Duration::from_secs(seconds as _);
+                            info!(
+                                "sleeping on {} for {:?} before retrying {}",
+                                name,
+                                delay,
+                                std::any::type_name::<R>()
+                            );
+                            tokio::time::sleep(delay).await;
+                            slept_flood = true;
+                            rx = self.request_tx.read().unwrap().enqueue(request);
+                            continue;
+                        }
+                        Err(e) => break Err(e),
                     }
-                    Err(e) => break Err(e),
-                },
+                }
                 Err(TryRecvError::Empty) => {
                     trace!("no response yet, invoking step");
                     on_updates(self.step().await?);
@@ -418,7 +438,9 @@ impl Connection {
 
     async fn step(&self) -> Result<Vec<tl::enums::Updates>, sender::ReadError> {
         let ticket_number = self.step_counter.load(Ordering::SeqCst);
+        trace!("before sender.lock");
         let mut sender = self.sender.lock().await;
+        trace!("after sender.lock");
         match self.step_counter.compare_exchange(
             ticket_number,
             // As long as the counter's modulo is larger than the amount of concurrent tasks, we're fine.
@@ -426,8 +448,14 @@ impl Connection {
             Ordering::SeqCst,
             Ordering::SeqCst,
         ) {
-            Ok(_) => sender.step().await, // We're the one to drive IO.
-            Err(_) => Ok(Vec::new()),     // A different task drove IO.
+            Ok(_) => {
+                trace!("invoking sender.step");
+                sender.step().await // We're the one to drive IO.
+            }
+            Err(_) => {
+                trace!("another task drove io");
+                Ok(Vec::new()) // A different task drove IO.
+            }
         }
     }
 }
