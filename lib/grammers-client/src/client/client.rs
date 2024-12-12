@@ -139,9 +139,9 @@ pub(crate) struct ClientState {
 }
 
 pub(crate) struct Connection {
-    pub(crate) sender: AsyncMutex<Sender<transport::Full, mtp::Encrypted>>,
+    pub(crate) replace_sender_tx:
+        tokio::sync::mpsc::Sender<Sender<transport::Full, mtp::Encrypted>>,
     pub(crate) request_tx: RwLock<Enqueuer>,
-    pub(crate) step_counter: AtomicU32,
 }
 
 /// A client capable of connecting to Telegram and invoking requests.

@@ -244,6 +244,11 @@ pub enum AuthorizationError {
     /// The generation failed because the generation process went wrong.
     Gen(authentication::Error),
 
+    /// MTSender replacement channel is closed, meaning that the whole future
+    /// running the loop was unwinded and dropped (for one reason or another).
+    /// The name of this variant follows from the deduction above.
+    MTSenderStepperDead,
+
     /// The generation failed because invoking a request failed.
     Invoke(InvocationError),
 }
@@ -255,6 +260,7 @@ impl fmt::Display for AuthorizationError {
         match self {
             Self::Gen(err) => write!(f, "authorization error: {err}"),
             Self::Invoke(err) => write!(f, "authorization error: {err}"),
+            Self::MTSenderStepperDead => write!(f, "authorization error: mtsender stepper is dead"),
         }
     }
 }

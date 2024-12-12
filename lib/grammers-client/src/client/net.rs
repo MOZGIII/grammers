@@ -296,6 +296,9 @@ impl Client {
             Err(AuthorizationError::Gen(e)) => {
                 panic!("authorization key generation failed: {e}")
             }
+            Err(AuthorizationError::MTSenderStepperDead) => {
+                todo!("authorization failed: mtsender stepper is dead")
+            }
         }
     }
 
@@ -364,10 +367,12 @@ impl Client {
 
 impl Connection {
     fn new(sender: Sender<transport::Full, mtp::Encrypted>, request_tx: Enqueuer) -> Self {
+        let (replace_sender_tx, replace_sender_rx) = tokio::sync::mpsc::channel(1);
+        let stepper = super::stepper::Stepper::new(sender, replace_sender_rx);
+        let _handle = tokio::spawn(stepper.run());
         Self {
-            sender: AsyncMutex::new(sender),
             request_tx: RwLock::new(request_tx),
-            step_counter: AtomicU32::new(0),
+            replace_sender_tx,
         }
     }
 
@@ -375,13 +380,12 @@ impl Connection {
         &self,
         request: &R,
         flood_sleep_threshold: u32,
-        on_updates: F,
     ) -> Result<R::Return, InvocationError> {
         let mut slept_flood = false;
 
         let mut rx = { self.request_tx.read().unwrap().enqueue(request) };
         loop {
-            match rx.try_recv() {
+            match rx.await {
                 Ok(response) => match response {
                     Ok(body) => break R::Return::from_bytes(&body).map_err(|e| e.into()),
                     Err(InvocationError::Rpc(RpcError {
@@ -404,28 +408,10 @@ impl Connection {
                     }
                     Err(e) => break Err(e),
                 },
-                Err(TryRecvError::Empty) => {
-                    on_updates(self.step().await?);
-                }
-                Err(TryRecvError::Closed) => {
+                Err(tokio::sync::oneshot::error::RecvError { .. }) => {
                     panic!("request channel dropped before receiving a result")
                 }
             }
-        }
-    }
-
-    async fn step(&self) -> Result<Vec<tl::enums::Updates>, sender::ReadError> {
-        let ticket_number = self.step_counter.load(Ordering::SeqCst);
-        let mut sender = self.sender.lock().await;
-        match self.step_counter.compare_exchange(
-            ticket_number,
-            // As long as the counter's modulo is larger than the amount of concurrent tasks, we're fine.
-            ticket_number.wrapping_add(1),
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        ) {
-            Ok(_) => sender.step().await, // We're the one to drive IO.
-            Err(_) => Ok(Vec::new()),     // A different task drove IO.
         }
     }
 }
